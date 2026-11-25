@@ -2,10 +2,12 @@
 
 This repository holds the deliverables for two client engagements from a Nairobi analytics consultancy:
 
-| Engagement | Client | Task | Folder |
-|---|---|---|---|
-| 1 | Duka Electronics | Explore and explain six months of sales data (Jan-Jun 2026) | `duka-sales_exploration.ipynb/` |
-| 2 | Mobile money agent network | Audit, clean, merge and summarise an unreliable transaction extract | `agent_cleanup.ipynb/` |
+## Notebooks in Google Colab
+
+| Engagement | Notebook |
+|---|---|
+| 1: Duka Electronics | [Open in Colab](https://colab.research.google.com/drive/1LZjz6jX8glTtBrTmZ6EjwnSV0dqdQbOy?usp=sharing) |
+| 2: Mobile money agents | [Open in Colab](https://colab.research.google.com/drive/1y5fcJr_EsO74LB_XvgzjWV_LMsVM118N?usp=sharing) |
 
 
 
