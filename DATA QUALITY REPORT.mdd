@@ -1,0 +1,155 @@
+# Data Quality Report: Mobile Money Agent Network Extract
+
+**Prepared for:** Data Governance Team
+**Prepared by:** [charlyne wanjiru]
+**Data covered:** `agent_transactions.csv` (transactions, 1 March to 29 April 2026) and `agents.csv` (agent register)
+**Code:** `cleaning_pipeline.py` (`clean_agent_data`), notebook `agent_cleanup.ipynb`
+
+---
+
+## 1. Summary
+
+The legacy extract was audited before any analysis. It held **612 rows**, but the underlying data describes **600 transactions**, so 12 rows were surplus copies. Nine distinct data-quality issues were found across six quality dimensions. Only the duplicates were deleted. Everything else was corrected in a way that can be reversed or was **flagged and kept**, so no information was lost silently.
+
+| | Result |
+|---|---|
+| Rows in | 612 |
+| Rows out | 600 |
+| Rows removed | 12 (duplicate transactions only) |
+| Records flagged for follow-up | 20 missing amounts, 5 suspect amounts (KES 250,000), 7 transactions from an unregistered agent |
+
+## 2. Audit findings
+
+Counts are on the raw 612 rows. They overlap, so the Rows column must not be added up.
+
+| # | Issue | Dimension | Column | Rows |
+|---|---|---|---|---|
+| 1 | Surplus copies of an existing `txn_id` | Uniqueness | `txn_id` | 12 |
+| 2 | Fully identical duplicate rows (a subset of issue 1) | Uniqueness | all columns | 11 |
+| 3 | `txn_type` has 5 spellings instead of 2 (case and whitespace variants) | Consistency | `txn_type` | 384 |
+| 4 | `txn_type` with leading or trailing whitespace (subset of issue 3) | Consistency | `txn_type` | 111 |
+| 5 | Amount blank | Completeness | `amount` | 15 |
+| 6 | Amount is the text "N/A" | Completeness | `amount` | 7 |
+| 7 | Amount of exactly KES 250,000 | Accuracy | `amount` | 5 |
+| 8 | Dates written with "/" instead of "-" | Validity | `txn_date` | 5 |
+| 9 | `agent_id` not in the agent register (AG099) | Integrity | `agent_id` | 8 |
+
+Notes on the audit method: pandas reads the text "N/A" as a missing value automatically, so a normal load hides the difference between blank and "N/A". The file was therefore also loaded as plain text (`dtype=str, keep_default_na=False`) so that each problem could be counted separately.
+
+## 3. Cleaning decisions and justification
+
+### 3.1 Duplicates (Uniqueness)
+Duplicates were identified on `txn_id`, which is the unique key, and not on whole rows. An exact-row check finds only 11, because one copy (TX00405) had its `agent_id` overwritten with the unregistered AG099, so it no longer matched its original on every column. For that pair the copy with the registered agent (AG014) was kept. **12 duplicates were removed (612 rows to 600).** The remaining IDs are TX00001 to TX00600 with none repeated.
+
+### 3.2 Transaction type (Consistency)
+Values were stripped of whitespace, lower-cased and mapped to exactly two labels, "Deposit" and "Withdrawal". Anything that did not map would become empty and be logged, and an assertion confirms that only two values remain. There were no missing `txn_type` values. Result: 373 deposits and 227 withdrawals.
+
+### 3.3 Types and formats (Validity)
+- `amount` was converted to numeric with unreadable values turned into missing values, after removing commas and whitespace.
+- `txn_date` was converted to a datetime. Five dates written as `2026/04/27` were standardised to `2026-04-27` and parsed with an explicit `%Y-%m-%d` format. A plain `pd.to_datetime` call silently turned those five into missing values in the pandas version used. After the fix there are 0 unparseable dates and all dates lie between 1 March and 29 April 2026.
+
+### 3.4 Missing amounts (Completeness)
+**Decision: keep the rows, set `amount_missing = True`, leave `amount` empty, and do not impute.** 20 transactions (3.3% of 600) are affected: 15 blank and 5 "N/A". No amounts are zero or negative.
+
+- *Why not impute?* This is a financial record. A filled-in amount creates money that was never moved, and figures shown to an auditor would be partly invented. Amounts are right-skewed (median about KES 1,777, mean about KES 4,574), so a mean or median would distort them. Imputing the median would add about KES 35,500 of value that never existed.
+- *Why not delete the rows?* The transactions happened and have a valid ID, agent and date. Deleting them would understate transaction counts and hide the data loss.
+- *Treatment in reporting:* value totals and averages use valid amounts only. Transaction counts include all 600 transactions.
+- The gaps are spread across both transaction types (deposits 3.5%, withdrawals 3.1%) and 15 different agents, so there is no sign that one agent or product is responsible.
+
+### 3.5 Outliers (Accuracy)
+The IQR method was applied to valid amounts: Q1 = KES 1,077, Q3 = KES 3,080, IQR = 2,003, upper fence = **KES 6,084.5** (the lower fence is negative, so nothing is flagged low). **40 transactions are flagged** in `is_outlier_iqr`.
+
+- **35 are ordinary high values** (KES 6,158 to 28,847). Money amounts are right-skewed, so a long upper tail is expected. These are kept unchanged.
+- **5 are exactly KES 250,000** (`amount_suspect = True`), which were investigated.
+
+**Investigation of the KES 250,000 values:**
+- The same round number appears five times in a column where all other amounts vary by single shillings.
+- It is almost nine times the next largest amount (KES 28,847).
+- It appears for 5 different agents (AG005, AG009, AG012, AG014, AG016), both transaction types and dates from 2 March to 11 April, so it is not tied to one agent or day.
+- The five rows are 0.8% of transactions but **47.1% of all transaction value**, and they move the mean amount from about KES 2,440 to KES 4,574.
+- As far as I know, KES 250,000 is also close to the per-transaction limit that Kenyan mobile-money providers apply (for example M-Pesa), so these may be limit or default values from the legacy system rather than real amounts. This should be confirmed against the provider's rules.
+
+**Recommendation:** do not delete them and do not trust them as they stand. Keep them flagged, verify the five transactions against the source ledger and agent float records, and until then report totals and averages **with and without** them, using the "without" figures as the headline. If the ledger confirms the amounts, clear the flag. If they are defaults or errors, correct them from the ledger or treat them like missing amounts.
+
+### 3.6 Unknown agents (Integrity)
+Transactions were joined to the agent register with a left join (`validate="many_to_one"`), so every transaction is kept and the row count did not change. **7 transactions (1.2%) reference agent AG099, who is not in the register**, worth KES 27,156 (about 1.0% of value). The raw file had 8 such rows, but the eighth was the duplicate copy removed in step 3.1.
+
+These transactions were kept, flagged with `agent_unregistered = True`, and given the county "Unknown (unregistered agent)" so they are shown on their own line and never mixed into a real county. The agent-management team should establish whether AG099 is a new, test or deactivated agent, or a keying error. This is also a possible control gap, because transactions were processed for an agent with no register entry.
+
+## 4. Before and after
+
+| | Before | After |
+|---|---|---|
+| Rows | 612 | 600 |
+| Duplicate transaction IDs | 12 | 0 |
+| `txn_type` distinct values | 5 | 2 |
+| `amount` | numeric text, "N/A" and blanks mixed in | numeric, 20 missing flagged |
+| `txn_date` | text, 2 formats | datetime, 1 format |
+| Unregistered-agent transactions | 8 | 7, flagged |
+| Suspect KES 250,000 amounts | 5 | 5, flagged |
+
+## 5. Impact on the results
+
+County totals use valid amounts and hold back the five unverified KES 250,000 values. Including them would add exactly KES 250,000 to each of the five registered counties (one each), nearly doubling most totals and exaggerating Nairobi's lead.
+
+| County | Total excluding KES 250,000 values | Total including them |
+|---|---|---|
+| Nairobi | 441,414 | 691,414 |
+| Mombasa | 260,472 | 510,472 |
+| Nakuru | 258,155 | 508,155 |
+| Kisumu | 255,689 | 505,689 |
+| Kiambu | 160,011 | 410,011 |
+| Unknown (unregistered agent) | 27,156 | 27,156 |
+| **All** | **1,402,897** | **2,652,897** |
+
+Nairobi has the most agents (6) and Kiambu the fewest (2), so the ranking partly reflects network size and not only agent performance.
+
+## 6. Cleaning log
+
+The function `clean_agent_data(txns, agents)` returns this log alongside the clean data (`cleaning_log.csv`).
+
+| Step | Dimension | Issue | Rows affected | Rows after |
+|---|---|---|---|---|
+| 0 | Audit | Rows loaded | 612 | 612 |
+| 1 | Uniqueness | Duplicate transaction IDs | 12 | 600 |
+| 2 | Consistency | `txn_type` variants | 376 | 600 |
+| 3 | Validity | Dates with "/" separator | 5 | 600 |
+| 3 | Validity | Dates that could not be parsed | 0 | 600 |
+| 4 | Completeness | Amount missing or invalid | 20 | 600 |
+| 5 | Accuracy | IQR outliers | 40 | 600 |
+| 5 | Accuracy | Amounts of exactly KES 250,000 | 5 | 600 |
+| 6 | Integrity | Agent not in register | 7 | 600 |
+| 7 | Audit | Rows returned | 600 | 600 |
+
+(Step 2 shows 376 while the audit in section 2 shows 384, because the pipeline counts after de-duplication and 8 of the removed duplicate copies had non-standard spellings. Likewise the 22 missing amounts in the raw file become 20 after de-duplication.)
+
+## 7. Recommendations
+
+1. Recover the 20 missing amounts from the source ledger and re-run the pipeline.
+2. Verify the five KES 250,000 transactions, and find out whether the legacy system writes a default or limit value.
+3. Resolve agent AG099: register it, or correct the agent ID on the 7 transactions. Review why transactions were accepted for an unregistered agent.
+4. Fix the source system so it enforces a unique `txn_id`, a controlled list of transaction types, one date format and a numeric `amount`.
+5. Run `clean_agent_data` on every new extract and have the log reviewed, so that new problems are caught early.
+
+## 8. Privacy: personal data and the Kenya Data Protection Act 2019
+
+The current extract holds only transaction IDs, agent IDs, transaction types, amounts and dates, which describe transactions rather than customers. If it also held **customer phone numbers**, the phone number would be personal data because it directly identifies a person. Fields that were harmless on their own (`txn_id`, `amount`, `txn_date`, `agent_id`, and through the agent the county) would also become personal data, because they could then be linked to a named individual and would reveal who sent or received money, how much, when and roughly where. Financial behaviour is not in the Act's list of "sensitive" categories as far as I know, but it should still be treated as high-risk.
+
+Protection measures:
+
+1. **Minimise:** leave phone numbers out of analytical extracts unless the analysis needs them (data minimisation and purpose limitation, section 25).
+2. **Pseudonymise:** replace each number with a keyed hash (HMAC) token, with the key held separately. A plain hash of a phone number is easy to reverse, because phone numbers can be guessed.
+3. **Aggregate for reporting:** county and weekly totals contain no personal data.
+4. **Secure:** role-based access, encryption in transit and at rest, and an access log (data protection by design and default, section 41).
+5. **Limit retention** (section 39), and be able to respond to data-subject requests for correction or erasure (sections 26 and 40).
+6. **Prepare for breaches:** notify the Data Commissioner within 72 hours (section 43), and use contracts that require any processor to report breaches to the controller promptly.
+7. **Assess:** carry out a data protection impact assessment (section 31) before processing customer-level data at scale.
+
+Pseudonymised data is still personal data under the Act, because the key can reverse it. This section is written for a coursework report and is not legal advice. The section numbers should be checked by a legal or data-protection officer before real use.
+
+## 9. Limitations
+
+- The KES 250,000 values and the unknown agent AG099 could not be resolved from the data alone and need confirmation from the data owner.
+- The IQR method assumes roughly symmetric data. Amounts are right-skewed, so some of the 35 ordinary high values are flagged only because of the skew and are not errors.
+- The weekly pivot's first week (23 February, one day) and last week (27 April, three days) are partial weeks.
+- The data is synthetic, generated with a fixed seed (44), so the numbers in this report are exactly reproducible with `generate_agent_data.py`.
